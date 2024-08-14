@@ -4,7 +4,7 @@ import warnings
 import torch
 from torch.utils import data
 import math
-from nesymres.utils import load_metadata_hdf5, load_eq
+from ..utils import load_metadata_hdf5, load_eq
 from sympy.core.rules import Transform
 from sympy import sympify, Float, Symbol
 from multiprocessing import Manager
@@ -35,7 +35,7 @@ from ..dataset.generator import Generator, UnknownSymPyOperator
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from nesymres.dclasses import DatasetDetails, Equation
+from ..dclasses import DatasetDetails, Equation
 from functools import partial
 from ordered_set import OrderedSet
 from pathlib import Path
