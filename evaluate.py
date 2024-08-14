@@ -12,19 +12,14 @@ from tpsr import tpsr_fit
 import time
 from tqdm import tqdm
 import copy
-
+import gzip
+import shutil
+import datasets.pmlb.pmlb.pmlb 
 
 def read_file(filename, label="target", sep=None): 
-    if filename.endswith("gz"):
-        compression = "gzip"
-    else:
-        compression = None
-    if sep:
-        input_data = pd.read_csv(filename, sep=sep, compression=compression)
-    else:
-        input_data = pd.read_csv(
-            filename, sep=sep, compression=compression, engine="python"
-        )
+    print("FILES:", filename)
+    input_data = datasets.pmlb.pmlb.pmlb.fetch_data(dataset_name=filename)
+    print(input_data.head())
     feature_names = [x for x in input_data.columns.values if x != label]
     feature_names = np.array(feature_names)
     X = input_data.drop(label, axis=1).values.astype(float)
@@ -118,7 +113,7 @@ def evaluate_pmlb(
             print("formula : ", formula)
 
             X, y, _ = read_file(
-                pmlb_path + "{}/{}.tsv.gz".format(problem_name, problem_name)
+                "{}/{}.tsv.gz".format(problem_name, problem_name)
             )
             y = np.expand_dims(y, -1)
 
@@ -257,10 +252,9 @@ def evaluate_pmlb_mcts(
             problems = problems[filter_fn(problems)]
             problems = problems.loc[problems['n_features']<11]
         problem_names = problems["dataset"].values.tolist()
-        pmlb_path = "./datasets/pmlb/datasets/"  # high_dim_datasets
-
+        pmlb_path = "C:/Users/soham/TPSR-main/datasets/pmlb/datasets/"
         feynman_problems = pd.read_csv(
-            "./datasets/feynman/FeynmanEquations.csv",
+            "datasets/feynman/FeynmanEquations.csv",
             delimiter=",",
         )
         feynman_problems = feynman_problems[["Filename", "Formula"]].dropna().values
@@ -284,7 +278,7 @@ def evaluate_pmlb_mcts(
                 formula = "???"
 
             X, y, _ = read_file(
-                pmlb_path + "{}/{}.tsv.gz".format(problem_name, problem_name)
+                "{}/{}.tsv.gz".format(problem_name, problem_name)
             )
             y = np.expand_dims(y, -1)
 
