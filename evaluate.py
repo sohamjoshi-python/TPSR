@@ -19,7 +19,6 @@ import datasets.pmlb.pmlb.pmlb
 def read_file(filename, label="target", sep=None): 
     print("FILES:", filename)
     input_data = datasets.pmlb.pmlb.pmlb.fetch_data(dataset_name=filename)
-    print(input_data.head())
     feature_names = [x for x in input_data.columns.values if x != label]
     feature_names = np.array(feature_names)
     X = input_data.drop(label, axis=1).values.astype(float)
