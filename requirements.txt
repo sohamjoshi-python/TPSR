@@ -74,3 +74,9 @@ wcwidth==0.2.6
 xgboost==1.6.2
 zipp==3.8.0
 zss==1.2.0
+pytorch-lightning
+hydra-core
+click
+ordered_set
+h5py
+dataclass_dict_convert
