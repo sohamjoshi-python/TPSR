@@ -391,7 +391,9 @@ def evaluate_pmlb_mcts(
                 problem_results["time"] = time_elapsed
                 problem_results["sample_times"] = sample_times
                 problem_results["bag_number"] = bag_number
-                if problem_results["r2_zero_fit"][0] > max_r2_zero:
+                if "r2_zero_fit" not in problem_results.columns or pd.isna(problem_results["r2_zero_fit"][0]):
+                    continue
+                elif problem_results["r2_zero_fit"][0] > max_r2_zero:
                     final_results = problem_results.copy()
                     max_r2_zero = problem_results["r2_zero_fit"][0]
             
