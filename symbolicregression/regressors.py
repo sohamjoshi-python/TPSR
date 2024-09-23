@@ -1,207 +1,176 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
- 
-from abc import ABC, abstractmethod
-from sklearn.model_selection import KFold
-import numpy as np
-import scipy
-try: import xgboost as xgb
-except: print("xgb problems")
-from sympy import *
 
-def order_data(X, y):
-    idx_sorted = np.squeeze(np.argsort(X[:, :1], axis=0), -1)
-    X = X[idx_sorted]
-    y = y[idx_sorted]
-    return X, y
+from logging import getLogger
+import os
+import sys
+import torch
+import socket
+import signal
+import subprocess
 
 
-def get_infinite_relative_error(prediction, truth):
-    abs_relative_error = np.abs((prediction - truth) / (truth + 1e-100))
-    abs_relative_error = np.nan_to_num(abs_relative_error, nan=np.infty)
-    return np.max(abs_relative_error)
+logger = getLogger()
 
 
-class Regressor(ABC):
-    def __init__(self, **args):
-        pass
-
-    @abstractmethod
-    def fit(self, X, y):
-        pass
-
-    @abstractmethod
-    def predict(self, X):
-        pass
-
-
-class DeepSymbolicRegressor(Regressor):
-    def __init__(self):
-        import dso
-
-        self.model = dso.DeepSymbolicRegressor()
-        self.n_samples = 2000
-
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        self.model.fit(X, y, n_samples=self.n_samples)
-
-    def predict(self, X):
-        return self.model.predict(X)
-
-class LagrangeRegressor(Regressor):
-    def __init__(self):
-        pass
-
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-
-        assert X.shape[0] == y.shape[0]
-        X = np.squeeze(X, -1)
-        self.model = scipy.interpolate.lagrange(X, y)
-
-    def predict(self, X):
-        if getattr(self, "model", None) is None:
-            assert False
-        X = np.squeeze(X, -1)
-        return self.model(X)
+def sig_handler(signum, frame):
+    logger.warning("Signal handler called with signal " + str(signum))
+    prod_id = int(os.environ["SLURM_PROCID"])
+    logger.warning("Host: %s - Global rank: %i" % (socket.gethostname(), prod_id))
+    if prod_id == 0:
+        logger.warning("Requeuing job " + os.environ["SLURM_JOB_ID"])
+        os.system("scontrol requeue " + os.environ["SLURM_JOB_ID"])
+    else:
+        logger.warning("Not the master process, no need to requeue.")
+    sys.exit(-1)
 
 
-class CubicSplineRegressor(Regressor):
-    def __init__(self):
-        pass
-
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        X, y = order_data(X, y)
-
-        X = np.squeeze(X, -1)
-        diff = np.diff(X)
-        duplicates = np.concatenate([[False], diff == 0])
-        X = X[~duplicates]
-        y = y[~duplicates]
-        self.model = scipy.interpolate.CubicSpline(X, y)
-
-    def predict(self, X):
-        if getattr(self, "model", None) is None:
-            assert False
-        X = np.squeeze(X, -1)
-        return self.model(X)
+def term_handler(signum, frame):
+    logger.warning("Signal handler called with signal " + str(signum))
+    logger.warning("Bypassing SIGTERM.")
 
 
-class gplearnSymbolicRegressor(Regressor):
-    def __init__(self, function_set, const_range):
-        import gplearn.genetic
+def init_signal_handler():
+    """
+    Handle signals sent by SLURM for time limit / pre-emption.
+    """
+    signal.signal(signal.SIGUSR1, sig_handler)
+    signal.signal(signal.SIGTERM, term_handler)
+    logger.warning("Signal handler installed.")
 
-        self.admissible_function_set = {
-            'add': lambda x, y : x + y,
-            'sub': lambda x, y : x - y,
-            'mul': lambda x, y : x*y,
-            'div': lambda x, y : x/y,
-            'sqrt': lambda x : x**0.5,
-            'log': lambda x : log(x),
-            'abs': lambda x : abs(x),
-            'neg': lambda x : -x,
-            'inv': lambda x : 1/x,
-            'max': lambda x, y : max(x, y),
-            'min': lambda x, y : min(x, y),
-            'sin': lambda x : sin(x),
-            'cos': lambda x : cos(x),
-            'pow': lambda x, y : x**y,
-        }
 
-        self.function_set = function_set.split(",")
-        self.function_set = list(set(self.function_set) & set(self.admissible_function_set.keys()))
-        self.const_range = const_range
-        self.model = gplearn.genetic.SymbolicRegressor(
-            function_set=self.function_set, const_range=self.const_range
+def init_distributed_mode(params):
+    """
+    Handle single and multi-GPU / multi-node / SLURM jobs.
+    Initialize the following variables:
+        - n_nodes
+        - node_id
+        - local_rank
+        - global_rank
+        - world_size
+    """
+    params.is_slurm_job = "SLURM_JOB_ID" in os.environ and not params.debug_slurm
+    print("SLURM job: %s" % str(params.is_slurm_job))
+
+    # SLURM job
+    if params.is_slurm_job:
+
+        assert params.local_rank == -1  # on the cluster, this is handled by SLURM
+
+        SLURM_VARIABLES = [
+            "SLURM_JOB_ID",
+            "SLURM_JOB_NODELIST",
+            "SLURM_JOB_NUM_NODES",
+            "SLURM_NTASKS",
+            "SLURM_TASKS_PER_NODE",
+            "SLURM_MEM_PER_NODE",
+            "SLURM_MEM_PER_CPU",
+            "SLURM_NODEID",
+            "SLURM_PROCID",
+            "SLURM_LOCALID",
+            "SLURM_TASK_PID",
+        ]
+
+        PREFIX = "%i - " % int(os.environ["SLURM_PROCID"])
+        for name in SLURM_VARIABLES:
+            value = os.environ.get(name, None)
+            print(PREFIX + "%s: %s" % (name, str(value)))
+
+        # # job ID
+        # params.job_id = os.environ['SLURM_JOB_ID']
+
+        # number of nodes / node ID
+        params.n_nodes = int(os.environ["SLURM_JOB_NUM_NODES"])
+        params.node_id = int(os.environ["SLURM_NODEID"])
+
+        # local rank on the current node / global rank
+        params.local_rank = int(os.environ["SLURM_LOCALID"])
+        params.global_rank = int(os.environ["SLURM_PROCID"])
+
+        # number of processes / GPUs per node
+        params.world_size = int(os.environ["SLURM_NTASKS"])
+        params.n_gpu_per_node = params.world_size // params.n_nodes
+
+        # define master address and master port
+        hostnames = subprocess.check_output(
+            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
         )
+        params.master_addr = hostnames.split()[0].decode("utf-8")
+        # assert 10001 <= params.master_port <= 20000 or params.world_size == 1
+        print(PREFIX + "Master address: %s" % params.master_addr)
+        print(PREFIX + "Master port   : %i" % params.master_port)
 
-    def get_function(self):
-        return sympify(str(self.model._program), locals=self.admissible_function_set)
+        # set environment variables for 'env://'
+        os.environ["MASTER_ADDR"] = params.master_addr
+        os.environ["MASTER_PORT"] = str(params.master_port)
+        os.environ["WORLD_SIZE"] = str(params.world_size)
+        os.environ["RANK"] = str(params.global_rank)
 
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        self.model.fit(X, y)
+    # multi-GPU job (local or multi-node) - jobs started with torch.distributed.launch
+    elif params.local_rank != -1:
 
-    def predict(self, X):
-        return self.model.predict(X)
+        assert params.master_port == -1
 
+        # read environment variables
+        params.global_rank = int(os.environ["RANK"])
+        params.world_size = int(os.environ["WORLD_SIZE"])
+        params.n_gpu_per_node = int(os.environ["NGPU"])
 
-class LinearRegressor(Regressor):
-    def __init__(self):
-        import sklearn.linear_model
+        # number of nodes / node ID
+        params.n_nodes = params.world_size // params.n_gpu_per_node
+        params.node_id = params.global_rank // params.n_gpu_per_node
 
-        self.model = sklearn.linear_model.LinearRegression()
+    # local job (single GPU)
+    else:
+        assert params.local_rank == -1
+        assert params.master_port == -1
+        params.n_nodes = 1
+        params.node_id = 0
+        params.local_rank = 0
+        params.global_rank = 0
+        params.world_size = 1
+        params.n_gpu_per_node = 1
 
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        self.model.fit(X, y)
+    # sanity checks
+    assert params.n_nodes >= 1
+    assert 0 <= params.node_id < params.n_nodes
+    assert 0 <= params.local_rank <= params.global_rank < params.world_size
+    assert params.world_size == params.n_nodes * params.n_gpu_per_node
 
-    def predict(self, X):
-        try: 
-            return self.model.predict(X)
-        except Exception as e:
-            print(e, X)
-            return None
-    
-class MLPRegressor(Regressor):
-    def __init__(self):
-        import sklearn.neural_network
+    # define whether this is the master process / if we are in distributed mode
+    params.is_master = params.node_id == 0 and params.local_rank == 0
+    params.multi_node = params.n_nodes > 1
+    params.multi_gpu = params.world_size > 1
 
-        self.model = sklearn.neural_network.MLPRegressor()
+    # summary
+    PREFIX = "%i - " % params.global_rank
+    print(PREFIX + "Number of nodes: %i" % params.n_nodes)
+    print(PREFIX + "Node ID        : %i" % params.node_id)
+    print(PREFIX + "Local rank     : %i" % params.local_rank)
+    print(PREFIX + "Global rank    : %i" % params.global_rank)
+    print(PREFIX + "World size     : %i" % params.world_size)
+    print(PREFIX + "GPUs per node  : %i" % params.n_gpu_per_node)
+    print(PREFIX + "Master         : %s" % str(params.is_master))
+    print(PREFIX + "Multi-node     : %s" % str(params.multi_node))
+    print(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
+    print(PREFIX + "Hostname       : %s" % socket.gethostname())
 
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        self.model.fit(X, y)
+    # set GPU device
+    if not params.cpu:
+        torch.cuda.set_device(params.local_rank)
 
-    def predict(self, X):
-        try: 
-            return self.model.predict(X)
-        except Exception as e:
-            print(e, X)
-            return None
-    
-class XGBoostRegressor(Regressor):
-    def __init__(self,**params):
-        self.params=params
-        pass
+    # initialize multi-GPU
+    if params.multi_gpu:
 
-    def fit(self, X, y):
-        if len(y.shape)>1: y = np.squeeze(y,-1)
-        assert X.shape[0] == y.shape[0]
-        self.model = xgb.XGBRegressor(**self.params)
-        try:
-            self.model.fit(X,y)
-        except Exception as e:
-            self.model = None
+        # http://pytorch.apachecn.org/en/0.3.0/distributed.html#environment-variable-initialization
+        # 'env://' will read these environment variables:
+        # MASTER_PORT - required; has to be a free port on machine with rank 0
+        # MASTER_ADDR - required (except for rank 0); address of rank 0 node
+        # WORLD_SIZE - required; can be set either here, or in a call to init function
+        # RANK - required; can be set either here, or in a call to init function
 
-    def predict(self, X):
-        if getattr(self, "model", None) is None:
-            return None
-        return self.model.predict(X)
-def cross_validate(model_class, X, y, n_splits=5):
-    kf = KFold(n_splits=n_splits)
-    metrics = []
-
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X[train_index], X[test_index]
-        Y_train, Y_test = y[train_index], y[test_index]
-
-        model = model_class()  # Instantiate the model
-        model.fit(X_train, Y_train)  # Fit on training data
-        y_pred = model.predict(X_test)  # Predict on test data
-
-        # Evaluate metrics (e.g., MSE or R2)
-        metric = evaluate_model(y_pred, Y_test)  # Define this function to compute your desired metric
-        metrics.append(metric)
-
-    avg_metric = np.mean(metrics)
-    print(f"Average metric across folds: {avg_metric}")
-    return avg_metric
+        print("Initializing PyTorch distributed ...")
+        torch.distributed.init_process_group(
+            init_method="env://", backend="nccl",
+        )
