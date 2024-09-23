@@ -303,3 +303,21 @@ class NesymresHeuristic:
             # clear hashed key, value pairs that are not consistent with new_state
             self.model.prefix_key_values.clear(new_state)
             self.model.top_k_hash.clear(new_state)
+from sklearn.model_selection import KFold
+
+def cross_validate(self, data, k=5):
+    kf = KFold(n_splits=k)
+    metrics = []
+    
+    for train_index, val_index in kf.split(data):
+        train_data, val_data = data[train_index], data[val_index]
+        
+        # Fit your model on train_data
+        self.fit(train_data)
+        
+        # Evaluate on val_data
+        val_metrics = self.evaluate(val_data)
+        metrics.append(val_metrics)
+    
+    avg_metrics = np.mean(metrics, axis=0)
+    print(f'Average metrics across {k} folds: {avg_metrics}')
