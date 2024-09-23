@@ -12,8 +12,6 @@ import random
 import getpass
 import argparse
 import subprocess
-from sklearn.model_selection import KFold
-
 
 import errno
 import signal
